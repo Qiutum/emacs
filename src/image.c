@@ -1357,6 +1357,7 @@ static void image_laplace (struct frame *, struct image *);
 static void image_emboss (struct frame *, struct image *);
 static void image_build_heuristic_mask (struct frame *, struct image *,
                                     Lisp_Object);
+static void image_recolor (struct frame *, struct image *, int flag);
 
 static void
 add_image_type (Lisp_Object type)
@@ -7102,6 +7103,276 @@ image_emboss (struct frame *f, struct image *img)
 {
   image_detect_edges (f, img, emboss_matrix, 0xffff / 2);
 }
+
+/* Holds RGB, HSL, HSV, Lab, or Lch... but note that the order in memory for HSL
+ * and HSV are actually VSH and LSH. */
+struct color
+{
+  union
+  {
+    double r, v, l;
+  };
+  union
+  {
+    double g, s, a;
+  };
+  union
+  {
+    double b, h;
+  };
+};
+
+static inline gboolean color_equal(struct color a, struct color b)
+{
+  return (a.r == b.r && a.g == b.g && a.b == b.b);
+}
+
+#define struct_color(x) (*((struct color *) x))
+#define vec_color(x) ((double *) &x)
+
+// Using values reported at https://bottosson.github.io/posts/oklab/#converting-from-linear-srgb-to-oklab
+// instead of going through xyz. This ensures any whitepoint is ignored
+static struct color
+rgb2oklab(struct color rgb)
+{
+  struct color srgb;
+
+  for (int i = 0; i < 3; i++)
+    {
+      double val = vec_color(rgb)[i];
+      vec_color(srgb)[i] = ((val > 0.04045)
+                            ? pow((val + 0.055) / 1.055, 2.4)
+                            : (val / 12.92));
+    }
+
+  double l = 0.4121656120 * srgb.r + 0.5362752080 * srgb.g + 0.0514575653 * srgb.b;
+  double m = 0.2118591070 * srgb.r + 0.6807189584 * srgb.g + 0.1074065790 * srgb.b;
+  double s = 0.0883097947 * srgb.r + 0.2818474174 * srgb.g + 0.6302613616 * srgb.b;
+
+  l = cbrt(l);
+  m = cbrt(m);
+  s = cbrt(s);
+
+  return (struct color) {
+    .l = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+    .a = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+    .b = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+  };
+}
+
+
+static double clamp(double x, double low, double high)
+{
+  return ((x < low)
+          ? low
+          : ((x > high) ? high : x));
+}
+
+static struct color
+oklab2rgb(struct color lab)
+{
+  double l = lab.l + 0.3963377774 * lab.a + 0.2158037573 * lab.b;
+  double m = lab.l - 0.1055613458 * lab.a - 0.0638541728 * lab.b;
+  double s = lab.l - 0.0894841775 * lab.a - 1.2914855480 * lab.b;
+
+  l = l * l * l;
+  m = m * m * m;
+  s = s * s * s;
+
+  struct color srgb = {
+    .r =  4.0767245293 * l - 3.3072168827 * m + 0.2307590544 * s,
+    .g = -1.2681437731 * l + 2.6093323231 * m - 0.3411344290 * s,
+    .b = -0.0041119885 * l - 0.7034763098 * m + 1.7068625689 * s
+  };
+
+  struct color rgb;
+  for (int i = 0; i < 3; i++)
+    {
+      double val = vec_color(srgb)[i];
+      val = ((val > 0.0031308)
+             ? (1.055 * pow(val, 1 / 2.4) - 0.055)
+             : (12.92 * val));
+
+      vec_color(rgb)[i] = clamp(val, 0.0, 1.0);
+    }
+
+  return rgb;
+}
+
+struct color rgb_fg, rgb_bg, oklab_fg, oklab_bg;
+
+struct color precomputed_rgb, precomputed_inv_rgb;
+
+void grayscale_recolor(int *r, int *g, int *b) {
+
+  const double a[] = { 0.30, 0.59, 0.11 };
+
+  const double rgb_diff[] = {
+    rgb_bg.r - rgb_fg.r,
+    rgb_bg.g - rgb_fg.g,
+    rgb_bg.b - rgb_fg.b
+  };
+
+  const double rgb[3] = {
+    (double) *r / 255.,
+    (double) *g / 255.,
+    (double) *b / 255.
+  };
+
+  /* compute h, s, l data   */
+  double l = a[0] * rgb[0] + a[1] * rgb[1] + a[2] * rgb[2];
+
+  /* linear interpolation between dark and light with color ligtness as
+  * a parameter */
+
+  *r =
+    (unsigned char) round (255. * (l * rgb_diff[0] + rgb_fg.r));
+  *g =
+    (unsigned char) round (255. * (l * rgb_diff[1] + rgb_fg.g));
+  *b =
+    (unsigned char) round (255. * (l * rgb_diff[2] + rgb_fg.b));
+}
+
+void oklab_recolor(int *r, int *g, int *b) {
+
+  struct color rgb = {
+    .r = (double) *r / 255.,
+    .g = (double) *g / 255.,
+    .b = (double) *b / 255.
+  };
+
+  const struct color white = {.r = 1.0, .g = 1.0, .b = 1.0};
+
+  if (color_equal(white, rgb)) {
+    rgb = rgb_bg;
+  }
+  else if (color_equal(precomputed_rgb, rgb)) {
+    rgb = precomputed_inv_rgb;
+  } else {
+
+  precomputed_rgb = rgb;
+  struct color oklab = rgb2oklab(rgb);
+
+
+  const double oklab_diff_l = oklab_fg.l - oklab_bg.l;
+
+  /* Invert the perceived lightness, and scales it */
+  double l = oklab.l;
+  double inv_l = 1.0 - l;
+  oklab.l = oklab_bg.l + oklab_diff_l * inv_l;
+
+  /* Have a and b parameters (which encode hue and saturation)
+     start at the background value and interpolate up to
+     foreground */
+  oklab.a = (oklab.a + oklab_bg.a * l + oklab_fg.a * inv_l);
+  oklab.b = (oklab.b + oklab_bg.b * l + oklab_fg.b * inv_l);
+
+  rgb = oklab2rgb (oklab);
+  precomputed_inv_rgb = rgb;
+  }
+  *r = (int) (rgb.r * 255);
+  *g = (int) (rgb.g * 255);
+  *b = (int) (rgb.b * 255);
+}
+
+
+static void
+image_recolor (struct frame *f, struct image *img, int flag) {
+/* image_pix_container_put_pixel (Emacs_Pix_Container image, */
+			       /* int x, int y, unsigned long pixel) */
+
+  /* Emacs_Color *new, *p; */
+  int x, y;
+  Emacs_Pix_Context ximg;
+  unsigned long pixel;
+#ifdef HAVE_NTGUI
+  HGDIOBJ prev;
+#endif /* HAVE_NTGUI */
+
+  ximg = image_get_x_image_or_dc (f, img, 0, &prev);
+
+  /* if (INT_MULTIPLY_WRAPV (sizeof *new, img->width, &nbytes) */
+  /*     || INT_MULTIPLY_WRAPV (img->height, nbytes, &nbytes)) */
+  /*   memory_full (SIZE_MAX); */
+  /* new = xmalloc (nbytes); */
+
+  unsigned long sum = 0;
+  for (x = 0; x < img->width; x++) {
+    for (y = 0; y < img->height; y++) {
+      pixel = GET_PIXEL (ximg, x, y);
+      int r, g, b;
+      r = RED_FROM_ULONG (pixel);
+      g = GREEN_FROM_ULONG (pixel);
+      b = BLUE_FROM_ULONG (pixel);
+      sum += (r + g + b) / 3;
+    }
+  }
+
+  if (sum / (img->width * img->height) < Vimage_recolor_threshold) return;
+
+  unsigned long pixel_fg, pixel_bg;
+  Emacs_Color color_fg, color_bg;
+
+  if (STRINGP (Vimage_recolor_foreground)
+      && x_defined_color (f, SSDATA (Vimage_recolor_foreground),
+			  &color_fg, false, false))
+    {
+    pixel_fg = RGB_TO_ULONG(color_fg.red, color_fg.green, color_fg.blue);
+    }
+  else
+    {
+      pixel_fg = FRAME_FOREGROUND_PIXEL(f);
+    }
+
+ if (STRINGP (Vimage_recolor_background)
+      && x_defined_color (f, SSDATA (Vimage_recolor_background),
+			  &color_bg, false, false))
+    {
+      pixel_bg = RGB_TO_ULONG(color_bg.red, color_bg.green, color_bg.blue);
+    }
+  else
+    {
+      pixel_bg = FRAME_BACKGROUND_PIXEL(f);
+    }
+
+  rgb_fg.r = (double)RED_FROM_ULONG(pixel_fg) / 255.;
+  rgb_fg.g = (double)GREEN_FROM_ULONG(pixel_fg) / 255.;
+  rgb_fg.b = (double)BLUE_FROM_ULONG(pixel_fg) / 255.;
+
+  rgb_bg.r = (double)RED_FROM_ULONG(pixel_bg) / 255.;
+  rgb_bg.g = (double)GREEN_FROM_ULONG(pixel_bg) / 255.;
+  rgb_bg.b = (double)BLUE_FROM_ULONG(pixel_bg) / 255.;
+
+  oklab_fg = rgb2oklab(rgb_fg);
+  oklab_bg = rgb2oklab(rgb_bg);
+
+  const struct color white = { .r = 1.0, .g = 1.0, .b = 1.0 };
+  precomputed_rgb = white;
+  precomputed_inv_rgb = rgb_bg;
+
+  for (x = 0; x < img->width; x++)
+  {
+  for (y = 0; y < img->height; y++)
+    {
+
+      pixel = GET_PIXEL (ximg, x, y);
+      int r, g, b;
+      r = RED_FROM_ULONG (pixel);
+      g = GREEN_FROM_ULONG (pixel);
+      b = BLUE_FROM_ULONG (pixel);
+
+      if (flag == 2)
+      oklab_recolor(&r, &g, &b);
+      else
+      grayscale_recolor(&r, &g, &b);
+
+      PUT_PIXEL (ximg, x, y, lookup_rgb_color (f, r << 8, g << 8, b << 8));
+    }
+  }
+
+  image_put_x_image (f, img, ximg, 0);
+}
+
 
 
 /* Transform image IMG which is used on frame F with a Laplace
