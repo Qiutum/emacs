@@ -1,0 +1,32 @@
+#+title: Image Recolor
+
+The image recolor use the same code from pdf-tools epdfinfo.c, therefore, provided two ways to recolor all the image inside the emacs
+
+
+1.  Bg-Fg Interpolation: maps source document colors to colors
+          interpolated between the background and foreground values
+          via the lightness of the source color.  This
+          discards hue information but allows you to fit your color theme
+          perfectly.
+
+#+begin_src emacs-lisp
+(setq image-recolor 'grayscale)
+#+end_src
+
+2. Hue-Preserving interpolation: same as above, similar to above, but
+          attempts to preserve hue while still respecting the background and
+          foreground colors.  This is done by matching source image white and
+          black to the specified background and foreground as above, but mixes
+          hue/saturation with the background color.  This preserves hue but is
+          more expensive.
+
+#+begin_src emacs-lisp
+(setq image-recolor t)
+(setq image-recolor 'oklab)
+#+end_src
+
+The image-recolor is set to t by default, to disable it totally, set it to nil.
+
+The ~image-recolor-threshold~ is provided to set the threshold to auto image-recolor, and its default value is set to 180. When any image is inserted into the emacs, the average of RGB will be calculated, if the RGB is larger than the ~image-recolor-threshold~, the image's color will be inverted
+
+The ~image-recolor-foreground~ and ~image-recolor-background~ is provided to set the foreground and background color used in invert color algorithm. When set to nil, which is also the default value, the current frame's foreground and background color will be used

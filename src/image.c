@@ -3590,6 +3590,18 @@ lookup_image (struct frame *f, Lisp_Object spec, int face_id)
 	  if (!EQ (builtin_lisp_symbol (img->type->type), Qpostscript))
 	    postprocess_image (f, img);
 
+	  if (!NILP (Vimage_recolor))
+	    {
+	      char *recolor_sym = NULL;
+	      if (SYMBOLP (Vimage_recolor))
+		recolor_sym = SSDATA (SYMBOL_NAME (Vimage_recolor));
+	      if (EQ (Vimage_recolor, Qt)
+		  || strcmp (recolor_sym, "oklab") == 0)
+		image_recolor (f, img, 2);
+	      else if (strcmp (recolor_sym, "grayscale") == 0)
+		image_recolor (f, img, 1);
+	    }
+
           /* postprocess_image above may modify the image or the mask,
              relying on the image's real width and height, so
              image_set_transform must be called after it.  */
