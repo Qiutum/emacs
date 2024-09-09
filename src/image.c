@@ -13208,6 +13208,24 @@ image_prune_animation_caches (bool clear)
 void
 syms_of_image (void)
 {
+  DEFVAR_LISP ("image-recolor", Vimage_recolor,
+  doc: /* set whether to auto recolor the image, nil to not auto recolor,
+      t or 'oklab to recolor by inverting the perceived lightness preserving hue
+      'grayscale to recolor by grayscale */);
+  Vimage_recolor = Qt;
+  DEFVAR_INT ("image-recolor-threshold", Vimage_recolor_threshold,
+	       doc: /* threshold to auto recolor the image */);
+  Vimage_recolor_threshold = 180;
+
+  DEFVAR_LISP ("image-recolor-foreground", Vimage_recolor_foreground,
+	       doc: /* foreground color for image recolor */
+  );
+  Vimage_recolor_foreground = Qnil;
+
+  DEFVAR_LISP ("image-recolor-background", Vimage_recolor_background,
+	       doc: /* background color for image recolor */);
+  Vimage_recolor_background = Qnil;
+
   /* Must be defined now because we're going to update it below, while
      defining the supported image types.  */
   DEFVAR_LISP ("image-types", Vimage_types,
